@@ -1,0 +1,12 @@
+## setting up environment and directories ####
+
+# load environment
+conda activate coralz
+
+# create directories
+mkdir Parallel_Evolution
+cd Parallel_Evolution
+mkdir heat_stress
+mkdir co2
+mkdir latitude
+mkdir symbiont

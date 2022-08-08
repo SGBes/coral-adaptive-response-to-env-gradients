@@ -1,0 +1,314 @@
+# load environment
+conda activate coralz
+
+# move to directory
+cds Parallel_Evolution/latitude
+
+# PRJNA265072
+
+export BioProject=PRJNA265072
+esearch -db sra -query $BioProject | efetch -format runinfo | cut -d "," -f 1 | grep SRR > $BioProject.SRR && esearch -db sra -query $BioProject | efetch -format runinfo > $BioProject.fullMeta.csv
+
+export BioProject=PRJNA265072
+>gets
+for A in `cat $BioProject.SRR`;do 
+echo "fasterq-dump $A">>gets;
+done
+ls6_launcher_creator.py -j gets -n gets -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 12 -q normal
+sbatch gets.slurm
+
+# on local terminal, copy over list of fastq files to select
+scp SRAnames_latitude.csv sbes29@ls6.tacc.utexas.edu:/scratch/07368/sbes29/Parallel_Evolution/latitude
+
+mkdir latitude_selected
+cd latitude_selected
+
+# save selected fastq files in current directory
+rsync -a /scratch/07368/sbes29/Parallel_Evolution/latitude --files-from=/scratch/07368/sbes29/Parallel_Evolution/latitude/SRAnames_latitude.csv /scratch/07368/sbes29/Parallel_Evolution/latitude/latitude_selected
+# this takes awhile
+
+# check fastq file count
+ll *.fastq | wc -l
+
+# sequences from NCBI aren't in colorspace format, so can skip below
+
+# in home directory
+#cdh bin
+# winscp this file over:
+# https://gist.github.com/pcantalupo/9c30709fe802c96ea2b3
+
+#cds Parallel_Evolution/latitude/latitude_selected
+
+# convert fastq from colorspace to sanger
+#>2fq
+#for file in `ls *.fastq`; do
+#echo "perl ~/bin/csfq2fq.pl $file > ${file/.fastq/}.sanger.fq" >> 2fq;
+#done
+#ls6_launcher_creator.py -j 2fq -n 2fq -a IBN21018 -e sbeskid@utexas.edu -t 12:00:00 -w 12 -q normal
+#sbatch 2fq.slurm
+# then change all *.sanger.fq to *.sanger.fastq
+
+#----trimming adapter----#
+
+cds Parallel_Evolution/latitude/latitude_selected
+
+# switch to conda environment with bowtie2 and cutadapt and samtools
+conda activate seashore
+
+# will be trimming reads...
+# TagLen depends on what kind of data you have: 100 is good for most RADs; for 2bRAD, change to 36.
+
+# check read length for a few samples
+less -S SSRR1640993.fastq
+
+# make reads the same length (-m sets minimum length and discards reads shorter than min. length)
+export TagLen=40
+
+# liberally assuming up to 5% divergence 
+export MatchFrac=0.95
+
+export GENOME_REF=$WORK/db/amil_symbTrans.fasta
+
+# trim with no subsampling
+>trim
+for file in *.fastq; do
+echo "cutadapt --format=fastq -q 15,15 -a AGATCGGA  -m $TagLen -l $TagLen -o ${file/.fastq/}.trim $file > ${file}_trimlog.txt" >> trim;
+done
+ls6_launcher_creator.py -j trim -n trim -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 48 -q normal
+sbatch trim.slurm
+
+#----mapping to reference genome and indexing----#
+
+conda activate seashore
+
+# mapping, converting to bam, indexing
+# using local read alignment to maximize alignment score (Bowtie 2 might "trim" or "clip" some read characters from one or both ends of the alignment if doing so maximizes the alignment score)
+# using CSI index as it supports longer references
+export REF=$WORK/db/Amil_symABCD.fasta
+>maps
+for F in `ls *.fastq`; do
+echo "bowtie2 --local --no-unal -x $REF -U ${F/.fastq/}.trim -S ${F/.fastq/}.sam && samtools sort -O bam -o ${F/.fastq/}.bam ${F/.fastq/}.sam && samtools index -c ${F/.fastq/}.bam">>maps;
+done
+ls6_launcher_creator.py -j maps -n maps -a IBN21018 -e sbeskid@utexas.edu -t 12:00:00 -w 6 -q normal
+sbatch maps.slurm
+
+mkdir latitude_concat
+cd latitude concat
+
+cp /scratch/07368/sbes29/Parallel_Evolution/latitude/latitude_selected/*.bam .
+
+# concatenate biosample with 1 genotyping replicates (just renaming the file)
+
+# format csv file for unix
+dos2unix latitude_forConcatenate_n1.csv
+
+# rename job didn't submit or work in idev...might've needed to specify number of nodes to use in job
+
+#>cats1
+#cat latitude_forConcatenate_n1.csv | perl -pe 's/(\S+),(\S+)/mv $1.bam $2.bam/'>>cats1
+#ls6_launcher_creator.py -j cats1 -n cats1 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1
+#sbatch cats1.slurm
+
+mv SRR1640949.bam K14.bam
+mv SRR1640929.bam K4.bam
+mv SRR1640930.bam K5.bam
+mv SRR1640981.bam O11.bam
+mv SRR1640956.bam O6.bam
+
+# concatenate biosample with 2 genotyping replicates
+
+# format csv file for unix
+dos2unix latitude_forConcatenate_n2.csv
+
+>cats2
+cat latitude_forConcatenate_n2.csv | perl -pe 's/(\S+),(\S+),(\S+)/samtools merge $3.bam $1.bam $2.bam/'>>cats2
+ls6_launcher_creator.py -j cats2 -n cats2 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1 -N 2
+sbatch cats2.slurm
+
+# double check all samples were concatenated
+
+# index concatenated bams
+>index
+for F in `ls *.bam`; do
+echo "samtools index -c ${F/.bam/}.bam">>index;
+done
+ls6_launcher_creator.py -j index -n index -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 12 -q normal
+sbatch index.slurm
+
+#----quality assessment of reads----#
+
+conda activate coralz
+
+# download plotQC.R to $HOME/bin
+# https://github.com/z0on/2bRAD_denovo/blob/master/plotQC.R
+#chmod +x plotQC.R
+
+# quality assessment, removing bams with log(coverage)<3SD
+# calculate minimum number of individuals (MI) a locus must be seen in (genotyping rate cutoff)
+# '-minInd' = N*0.5, so 30*0.5 = 15
+FILTERSQ="-uniqueOnly 1 -remove_bads 1 -minMapQ 30 -minInd 15"
+TODOQ="-doQsDist 1 -doDepth 1 -doCounts 1 -dumpCounts 2"
+echo "ls *.bam > bams && angsd -bam bams -r chr1 -GL 1 $FILTERSQ $TODOQ -P 12 -out dd && Rscript ~/bin/plotQC.R prefix=dd bams=bams >qualRanks">a0
+ls6_launcher_creator.py -j a0 -n a0 -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 1 -q normal
+sbatch a0.slurm
+
+# here, check dd.pdf for quality assessment of reads
+
+#----IBS production for PCA----#
+
+conda deactivate
+# note: conda angsd has errors that lead to weird filtering of sites and no SAF, so will use installed angsd
+
+# check number of bam files for -minInd argument
+wc -l bams.qc
+
+# -minInd is the genotyping rate cutoff, the number of individuals a site needs to be visible in (not a percent)
+
+# N = 30
+# -minInd ~ 23 = 30 * 0.75 
+
+FILTERS="-uniqueOnly 1 -remove_bads 1 -skipTriallelic 1 -minMapQ 30 -minQ 20 -dosnpstat 1 -doHWE 1 -maxHetFreq 0.5 -sb_pval 1e-5 -hetbias_pval 1e-5 -minInd 23 -snp_pval 1e-5 -minMaf 0.05"
+TODO8="-doMajorMinor 1 -doMaf 1 -doCounts 1 -makeMatrix 1 -doIBS 1 -doCov 1 -doGeno 8 -doPost 1 -doGlf 2"
+echo "~/angsd/angsd -b bams.qc -GL 1 $FILTERS $TODO8 -P 12 -out zz8IBS">zz8
+ls6_launcher_creator.py -j zz8 -n zz8 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1 -q normal
+sbatch zz8.slurm
+
+# use IBS matrix in R to plot PCA
+
+#----test for clones----#
+
+mkdir clone_check
+cd clone_check
+
+cp /scratch/07368/sbes29/Parallel_Evolution/latitude/latitude_selected/latitude_concat/*.bam .
+
+# duplicate 3 bams - these will be our clones to check in R
+cp O14.bam O14_clone.bam
+cp K11.bam K11_clone.bam
+cp O10.bam O10_clone.bam
+
+ls *.bam > bam_clone.qc
+
+wc -l bam_clone.qc
+
+# N = 33
+# -minInd ~ 25 = 33 * 0.75 
+
+FILTERS="-uniqueOnly 1 -remove_bads 1 -skipTriallelic 1 -minMapQ 30 -minQ 20 -dosnpstat 1 -doHWE 1 -maxHetFreq 0.5 -sb_pval 1e-5 -hetbias_pval 1e-5 -minInd 25 -snp_pval 1e-5 -minMaf 0.05"
+TODO8="-doMajorMinor 1 -doMaf 1 -doCounts 1 -makeMatrix 1 -doIBS 1 -doCov 1 -doGeno 8 -doPost 1 -doGlf 2"
+echo "~/angsd/angsd -b bam_clone.qc -GL 1 $FILTERS $TODO8 -P 12 -out zz8IBS">zz8
+ls6_launcher_creator.py -j zz8 -n zz8 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1 -q normal
+sbatch zz8.slurm
+
+#----allele frequency spectrum (AFS) production----#
+
+# prepare AFS: identify sites to work with and estimate site frequency spectrum (SFS) for each population
+
+# re-run angsd with filters to get sites
+# -snp_pval 1e-5 to keep only sites that are variable (sets cutoff for significance of sites as variable)
+# -minInd is the genotyping rate cutoff (GRate) determined in dd.pdf panel #3
+# note: filter for 0.75 genotyping rate
+# -minMaf minimum allele frequency
+
+wc -l bams.qc
+
+# might need to try 0.5 genotyping rate is getting no sites following filtering
+
+# N = 30
+# -minInd ~ 23 = 30 * 0.75
+
+# -doGeno 11 prints
+# 1: print out major minor
+# 2: print the called genotype as -1,0,1,2 (count of minor)
+# 8: print all 3 posts (major,major),(major,minor),(minor,minor)
+# 11 is the sum of above
+
+FILTERS="-uniqueOnly 1 -skipTriallelic 1 -minMapQ 30 -minQ 30 -doHWE 1 -maxHetFreq 0.5 -sb_pval 1e-5 -snp_pval 1e-5 -hetbias_pval 1e-5 -minMaf 0.05"
+TODO="-doMajorMinor 1 -doMaf 1 -dosnpstat 1 -doPost 2 -doGeno 11"
+echo "~/angsd/angsd -b bams.qc -GL 1 -P 12 $FILTERS $TODO -minInd 23 -out oksites" > asf1
+ls6_launcher_creator.py -j asf1 -n asf1 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1 -q normal
+sbatch asf1.slurm
+
+idev
+zcat oksites.mafs.gz | cut -f 1,2 | tail -n +2 > goodsites
+~/angsd/angsd sites index goodsites
+exit
+
+# in R, create population lists for pairwise comparison
+
+# correct for weird Windows feature
+dos2unix SRAnames_latitude_pop_orpheus.csv
+dos2unix SRAnames_latitude_pop_keppel.csv
+
+# save bam lists
+grep bam SRAnames_latitude_pop_orpheus.csv > latitude_pop_orpheus
+grep bam SRAnames_latitude_pop_keppel.csv > latitude_pop_keppel
+
+# generate per-population SAF
+export GENOME_REF=$WORK/db/Amil_symABCD.fasta
+TODO="-doSaf 1 -doMajorMinor 1 -doMaf 1 -doPost 1 -anc $GENOME_REF -ref $GENOME_REF"
+echo "~/angsd/angsd -sites goodsites -b latitude_pop_orpheus -GL 1 -P 1 $TODO -out latitude_pop_orpheus
+~/angsd/angsd -sites goodsites -b latitude_pop_keppel -GL 1 -P 1 $TODO -out latitude_pop_keppel">sfsa
+ls6_launcher_creator.py -j sfsa -n sfsa -t 1:00:00 -e sbeskid@utexas.edu -w 1 -a IBN21018 -q normal
+sbatch sfsa.slurm
+
+# generate per-population SFS
+realSFS latitude_pop_orpheus.saf.idx > latitude_pop_orpheus.sfs
+realSFS latitude_pop_keppel.saf.idx > latitude_pop_keppel.sfs
+
+# these results will be used later for allele frequency spectrum analysis
+
+#----calculate fixation index (Fst)----#
+
+# produce a 2D-SFS to serve as prior for Fst calculation
+export GENOME_REF=$WORK/db/Amil_symABCD.fasta
+echo "realSFS latitude_pop_keppel.saf.idx latitude_pop_orpheus.saf.idx -ref $GENOME_REF -m 0 -anc $GENOME_REF >ok.sfs" > 2dSFS
+ls6_launcher_creator.py -j 2dSFS -n 2dSFS -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 1 -q normal
+sbatch 2dSFS.slurm
+
+# calculate Fst
+realSFS fst index latitude_pop_keppel.saf.idx latitude_pop_orpheus.saf.idx -sfs ok.sfs -fstout OK
+
+# global Fst between populations; to print outcome from above
+realSFS fst stats OK.fst.idx
+
+# per-site Fst; print to OK.fst
+realSFS fst print OK.fst.idx > OK.fst
+
+# use *.fst file in R for plotting -- currently Fst is per SNP, so in R convert to per gene
+
+#----posterior allele frequencies (based on SFS)----#
+
+# check number of samples in each population
+
+wc -l latitude_pop_keppel # keppel: mid-latitude
+# N = 15
+# -minInd ~ 11 = 15 * 0.75
+
+wc -l latitude_pop_orpheus # orpheus: low-latitude
+# N = 15
+# -minInd ~ 11 = 15 * 0.75
+
+export GENOME_REF=$WORK/db/Amil_symABCD.fasta
+TODO="-doSaf 1 -doMajorMinor 4 -doMaf 1 -doPost 3 -anc $GENOME_REF -ref $GENOME_REF"
+echo "~/angsd/angsd -b latitude_pop_keppel -sites goodsites -GL 1 -P 12 -minInd 11 $TODO -pest latitude_pop_keppel.sfs -out latitude_pop_keppel_sfs
+~/angsd/angsd -b latitude_pop_orpheus -sites goodsites -GL 1 -P 12 -minInd 11 $TODO -pest latitude_pop_orpheus.sfs -out latitude_pop_orpheus_sfs" >postMaf
+ls6_launcher_creator.py -j postMaf -n postMaf -t 6:00:00 -a IBN21018 -e sbeskid@utexas.edu -w 2 -q normal
+sbatch postMaf.slurm
+
+# will get *.mafs.gz and *.mafs.gz
+
+#----extract gene counts for DESeq2----#
+
+cds Parallel_Evolution/latitude/latitude_selected
+
+conda activate coralz
+
+# choose the GFF
+MY_GFF="$WORK/db/Amil.coding.gff3"; GENE_ID="ID"
+
+echo "featureCounts -a $MY_GFF -p -t gene -g $GENE_ID -o feature_counts_out.txt -T 64 --primary *.bam" > runFeatureCounts
+ls6_launcher_creator.py -n runFeatureCounts -j runFeatureCounts -q normal -N 5 -w 1 -a IBN21018 -e sbeskid@utexas.edu -t 4:00:00
+sbatch runFeatureCounts.slurm
+
+# scp feature_counts_out.txt to directory on computer so can work with in R studio

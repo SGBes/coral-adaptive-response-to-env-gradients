@@ -1,0 +1,56 @@
+# cd-hit
+cdh bin
+git clone https://github.com/weizhongli/cdhit.git
+cd cdhit
+make
+
+# angsd
+# install xz first (a C program)
+cd
+wget https://tukaani.org/xz/xz-5.2.4.tar.gz --no-check-certificate
+tar vxf xz-5.2.4.tar.gz 
+cd xz-5.2.4/
+./configure --prefix=$HOME/xz-5.2.4/
+make
+make install
+
+# edit .bashrc:
+cd
+nano .bashrc
+# section 2:
+   export LD_LIBRARY_PATH=$HOME/xz-5.2.4/lib:$LD_LIBRARY_PATH
+   export LIBRARY_PATH=$HOME/xz-5.2.4/lib:$LIBRARY_PATH
+   export C_INCLUDE_PATH=$HOME/xz-5.2.4/include:$C_INCLUDE_PATH
+# save and exit
+logout
+# re-login
+
+# now, install htslib:
+cd
+git clone https://github.com/samtools/htslib.git
+cd htslib
+make CFLAGS=" -g -Wall -O2 -D_GNU_SOURCE -I$HOME/xz-5.2.4/include"
+
+# Error: htscodecs submodule files not present for htslib.
+# Try running:
+git submodule update --init --recursive
+# in the top-level htslib directory and then re-run make.
+# make: *** [Makefile:478: htscodecs/htscodecs] Error 1
+
+# move back to cd /htslib and rerun make line
+
+# install ANGSD
+cd
+git clone https://github.com/ANGSD/angsd.git 
+cd angsd
+make HTSSRC=../htslib
+
+# now adding ANGSD to $PATH
+cd
+nano .bashrc
+# section 2:
+   export PATH=$HOME/angsd:$PATH
+   export PATH=$HOME/angsd/misc:$PATH
+# save (Ctl-O, Ctl-X)
+logout
+# log back in

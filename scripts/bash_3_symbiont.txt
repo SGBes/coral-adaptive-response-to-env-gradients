@@ -1,0 +1,258 @@
+# load environment
+conda activate coralz
+
+# move to directory
+cds Parallel_Evolution/symbiont
+
+# PRJNA818361
+
+export BioProject=PRJNA818361
+esearch -db sra -query $BioProject | efetch -format runinfo | cut -d "," -f 1 | grep SRR > $BioProject.SRR && esearch -db sra -query $BioProject | efetch -format runinfo > $BioProject.fullMeta.csv
+
+export BioProject=PRJNA818361
+>gets
+for A in `cat $BioProject.SRR`;do 
+echo "fasterq-dump $A">>gets;
+done
+ls6_launcher_creator.py -j gets -n gets -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 12 -q normal
+sbatch gets.slurm
+
+# check fastq file count
+ll *.fastq | wc -l
+
+#----trimming adapter----#
+
+# switch to conda environment with bowtie2 and cutadapt and samtools
+conda activate seashore
+
+# samples are TagSeq, so (you'll only need to install TagSeq scripts once)...
+# download and install TagSeq scripts in $HOME/bin
+cd $HOME/bin
+# clone TagSeq github repositories
+git clone https://github.com/z0on/tag-based_RNAseq.git
+# move scripts to ~/bin from sub-directories
+mv tag-based_RNAseq/* . 
+# remove now-empty directory
+rm -rf tag-based_RNAseq
+# designating all .pl and .py files (perl and python scripts) as executable
+chmod +x *.pl 
+chmod +x *.py
+
+cds Parallel_Evolution/symbiont
+# trim reads
+>clean
+for F in *.fastq; do
+echo "tagseq_clipper.pl $F | cutadapt - -a AAAAAAAA -a AGATCGG -q 15 -m 25 -o ${F/.fastq/}.trim" >>clean;
+done
+ls6_launcher_creator.py -j clean -n clean -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 48 -q normal
+sbatch clean.slurm
+
+#----mapping to reference genome and indexing----#
+
+# mapping, converting to bam, indexing
+# using local read alignment to maximize alignment score (Bowtie 2 might "trim" or "clip" some read characters from one or both ends of the alignment if doing so maximizes the alignment score)
+# using CSI index as it supports longer references
+export REF=$WORK/db/Amil_symABCD.fasta
+>maps
+for F in `ls *.fastq`; do
+echo "bowtie2 --local --no-unal -x $REF -U ${F/.fastq/}.trim -S ${F/.fastq/}.sam && samtools sort -O bam -o ${F/.fastq/}.bam ${F/.fastq/}.sam && samtools index -c ${F/.fastq/}.bam">>maps;
+done
+ls6_launcher_creator.py -j maps -n maps -a IBN21018 -e sbeskid@utexas.edu -t 12:00:00 -w 6 -q normal
+sbatch maps.slurm
+
+# concatenate biosamples with 2 genotyping replicates
+
+# format csv file for unix
+dos2unix symbiont_forConcatenate_n2.csv
+
+>cats2
+cat symbiont_forConcatenate_n2.csv | perl -pe 's/(\S+),(\S+),(\S+)/samtools merge $3.bam $1.bam $2.bam/'>>cats2
+ls6_launcher_creator.py -j cats2 -n cats2 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1
+sbatch cats2.slurm
+
+# concatenate biosamples with 3 genotyping replicates
+
+# format csv file for unix
+dos2unix symbiont_forConcatenate_n3.csv
+
+>cats3
+cat symbiont_forConcatenate_n3.csv | perl -pe 's/(\S+),(\S+),(\S+),(\S+)/samtools merge $4.bam $1.bam $2.bam $3.bam/'>>cats3
+ls6_launcher_creator.py -j cats3 -n cats3 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 2 -q normal
+sbatch cats3.slurm
+
+# double check all samples were concatenated
+# oddly, sample listed in last line of csv wasn't concatenated and had to be done on idev
+
+# move original BAM and (preceding files) to separate directory
+mkdir original_sequences
+idev
+mv SRR*.bam /scratch/07368/sbes29/Parallel_Evolution/symbiont/original_sequences
+mv SRR*.fastq /scratch/07368/sbes29/Parallel_Evolution/symbiont/original_sequences
+mv SRR*.sam /scratch/07368/sbes29/Parallel_Evolution/symbiont/original_sequences
+mv SRR*.bam.csi /scratch/07368/sbes29/Parallel_Evolution/symbiont/original_sequences
+mv SRR*.trim /scratch/07368/sbes29/Parallel_Evolution/symbiont/original_sequences
+# wait until done...
+exit
+
+# index concatenated bams
+>index
+for F in `ls *.bam`; do
+echo "samtools index -c ${F/.bam/}.bam">>index;
+done
+ls6_launcher_creator.py -j index -n index -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 12 -q normal
+sbatch index.slurm
+
+#----quality assessment of reads----#
+
+conda activate coralz
+
+# download plotQC.R to $HOME/bin
+# https://github.com/z0on/2bRAD_denovo/blob/master/plotQC.R
+#chmod +x plotQC.R
+
+# quality assessment, removing bams with log(coverage)<3SD
+# calculate minimum number of individuals (MI) a locus must be seen in (genotyping rate cutoff)
+# '-minInd' = N*0.5, so 20*0.5 = 10
+FILTERSQ="-uniqueOnly 1 -remove_bads 1 -minMapQ 30 -minInd 10"
+TODOQ="-doQsDist 1 -doDepth 1 -doCounts 1 -dumpCounts 2"
+echo "ls *.bam > bams && angsd -bam bams -r chr1 -GL 1 $FILTERSQ $TODOQ -P 12 -out dd && Rscript ~/bin/plotQC.R prefix=dd bams=bams >qualRanks">a0
+ls6_launcher_creator.py -j a0 -n a0 -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 1 -q normal
+sbatch a0.slurm
+
+# here, check dd.pdf for quality assessment of reads
+
+#----IBS production for PCA----#
+
+# copy over new bams.qc file - had to remove samples that were excluded from original study
+dos2unix SRAnames_symbiont_updated.csv
+grep bam SRAnames_symbiont_updated.csv > bams_updated.qc
+
+conda deactivate
+# note: conda angsd has errors that lead to weird filtering of sites and no SAF, so will use installed angsd
+
+# check number of bam files for -minInd argument
+wc -l bams_updated.qc
+
+# -minInd is the genotyping rate cutoff, the number of individuals a site needs to be visible in (not a percent)
+
+# N = 9
+# -minInd ~ 7 = 9 * 0.75 
+
+FILTERS="-uniqueOnly 1 -remove_bads 1 -skipTriallelic 1 -minMapQ 30 -minQ 20 -dosnpstat 1 -doHWE 1 -maxHetFreq 0.5 -sb_pval 1e-5 -hetbias_pval 1e-5 -minInd 7 -snp_pval 1e-5 -minMaf 0.05"
+TODO8="-doMajorMinor 1 -doMaf 1 -doCounts 1 -makeMatrix 1 -doIBS 1 -doCov 1 -doGeno 8 -doPost 1 -doGlf 2"
+echo "~/angsd/angsd -b bams_updated.qc -GL 1 $FILTERS $TODO8 -P 12 -out zz8IBS">zz8
+ls6_launcher_creator.py -j zz8 -n zz8 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1 -q normal
+sbatch zz8.slurm
+
+# use IBS matrix in R to plot PCA
+
+#----allele frequency spectrum (AFS) production----#
+
+# prepare AFS: identify sites to work with and estimate site frequency spectrum (SFS) for each population
+
+# re-run angsd with filters to get sites
+# -snp_pval 1e-5 to keep only sites that are variable (sets cutoff for significance of sites as variable)
+# -minInd is the genotyping rate cutoff (GRate) determined in dd.pdf panel #3
+# note: filter for 0.75 genotyping rate
+# -minMaf minimum allele frequency
+
+wc -l bams_updated.qc
+
+# might need to try 0.5 genotyping rate is getting no sites following filtering
+
+# N = 9
+# -minInd ~ 7 = 9 * 0.75 
+
+# -doGeno 11 prints
+# 1: print out major minor
+# 2: print the called genotype as -1,0,1,2 (count of minor)
+# 8: print all 3 posts (major,major),(major,minor),(minor,minor)
+# 11 is the sum of above
+
+FILTERS="-uniqueOnly 1 -skipTriallelic 1 -minMapQ 30 -minQ 30 -doHWE 1 -maxHetFreq 0.5 -sb_pval 1e-5 -snp_pval 1e-5 -hetbias_pval 1e-5 -minMaf 0.05"
+TODO="-doMajorMinor 1 -doMaf 1 -dosnpstat 1 -doPost 2 -doGeno 11"
+echo "~/angsd/angsd -b bams_updated.qc -GL 1 -P 12 $FILTERS $TODO -minInd 7 -out oksites" > asf1
+ls6_launcher_creator.py -j asf1 -n asf1 -a IBN21018 -e sbeskid@utexas.edu -t 1:00:00 -w 1 -q normal
+sbatch asf1.slurm
+
+idev
+zcat oksites.mafs.gz | cut -f 1,2 | tail -n +2 > goodsites
+~/angsd/angsd sites index goodsites
+exit
+
+# in R, create population lists for pairwise comparison
+
+# correct for weird Windows feature
+dos2unix SRAnames_symbiont_pop_c.csv
+dos2unix SRAnames_symbiont_pop_d.csv
+
+# save bam lists
+grep bam SRAnames_symbiont_pop_c.csv > symbiont_pop_c
+grep bam SRAnames_symbiont_pop_d.csv > symbiont_pop_d
+
+# generate per-population SAF
+export GENOME_REF=$WORK/db/Amil_symABCD.fasta
+TODO="-doSaf 1 -doMajorMinor 1 -doMaf 1 -doPost 1 -anc $GENOME_REF -ref $GENOME_REF"
+echo "~/angsd/angsd -sites goodsites -b symbiont_pop_c -GL 1 -P 1 $TODO -out symbiont_pop_c
+~/angsd/angsd -sites goodsites -b symbiont_pop_d -GL 1 -P 1 $TODO -out symbiont_pop_d">sfsa
+ls6_launcher_creator.py -j sfsa -n sfsa -t 1:00:00 -e sbeskid@utexas.edu -w 1 -a IBN21018 -q normal
+sbatch sfsa.slurm
+
+# generate per-population SFS
+realSFS symbiont_pop_c.saf.idx > symbiont_pop_c.sfs
+realSFS symbiont_pop_d.saf.idx > symbiont_pop_d.sfs
+
+# these results will be used later for allele frequency spectrum analysis
+
+#----calculate fixation index (Fst)----#
+
+# produce a 2D-SFS to serve as prior for Fst calculation
+export GENOME_REF=$WORK/db/Amil_symABCD.fasta
+echo "realSFS symbiont_pop_d.saf.idx symbiont_pop_c.saf.idx -ref $GENOME_REF -m 0 -anc $GENOME_REF >ok.sfs" > 2dSFS
+ls6_launcher_creator.py -j 2dSFS -n 2dSFS -a IBN21018 -e sbeskid@utexas.edu -t 2:00:00 -w 1 -q normal
+sbatch 2dSFS.slurm
+
+# calculate Fst
+realSFS fst index symbiont_pop_d.saf.idx symbiont_pop_c.saf.idx -sfs ok.sfs -fstout OK
+
+# global Fst between populations; to print outcome from above
+realSFS fst stats OK.fst.idx
+
+# per-site Fst; print to OK.fst
+realSFS fst print OK.fst.idx > OK.fst
+
+# use *.fst file in R for plotting -- currently Fst is per SNP, so in R convert to per gene
+
+#----posterior allele frequencies (based on SFS)----#
+
+# check number of samples in each population
+
+wc -l symbiont_pop_d # symbiont clade D
+# N = 4
+# -minInd ~ 3 = 4 * 0.75
+
+wc -l symbiont_pop_c # symbiont clade C
+# N = 5
+# -minInd ~ 4 = 5 * 0.75
+
+export GENOME_REF=$WORK/db/Amil_symABCD.fasta
+TODO="-doSaf 1 -doMajorMinor 4 -doMaf 1 -doPost 3 -anc $GENOME_REF -ref $GENOME_REF"
+echo "~/angsd/angsd -b symbiont_pop_d -sites goodsites -GL 1 -P 12 -minInd 4 $TODO -pest symbiont_pop_d.sfs -out symbiont_pop_d_sfs
+~/angsd/angsd -b symbiont_pop_c -sites goodsites -GL 1 -P 12 -minInd 4 $TODO -pest symbiont_pop_c.sfs -out symbiont_pop_c_sfs" >postMaf
+ls6_launcher_creator.py -j postMaf -n postMaf -t 6:00:00 -a IBN21018 -e sbeskid@utexas.edu -w 2 -q normal
+sbatch postMaf.slurm
+
+# will get *.mafs.gz and *.mafs.gz
+
+#----extract gene counts for DESeq2----#
+
+conda activate coralz
+
+# choose the GFF
+MY_GFF="$WORK/db/Amil.coding.gff3"; GENE_ID="ID"
+
+echo "featureCounts -a $MY_GFF -p -t gene -g $GENE_ID -o feature_counts_out.txt -T 64 --primary *.bam" > runFeatureCounts
+ls6_launcher_creator.py -n runFeatureCounts -j runFeatureCounts -q normal -N 5 -w 1 -a IBN21018 -e sbeskid@utexas.edu -t 4:00:00
+sbatch runFeatureCounts.slurm
+
+# scp feature_counts_out.txt to directory on computer so can work with in R studio

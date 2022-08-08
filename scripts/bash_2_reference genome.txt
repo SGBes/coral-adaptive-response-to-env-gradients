@@ -1,0 +1,60 @@
+# load environmnet
+conda activate coralz
+
+# move to work directory
+cdw
+
+# create directory to store reference genome
+mkdir db
+cd db
+
+# copy A. millepora genome fasta from misha
+#cp /corral-repl/utexas/tagmap/matz_shared/Amil.v2.01.fasta .
+
+# check chromosome names for A. millepora genome
+#grep ">chr" Amil.v2.01.fasta
+
+# save genome fasta for symbionts
+# file: symABCD.fasta  - transcriptomes ("chromosomes" 21-24) - https://www.dropbox.com/s/h410rpf3rvpozeg/symABCD.fasta?dl=0
+#wget https://www.dropbox.com/s/kzhhjnb8kgd7o9h/symABCD.fasta.zip?dl=0
+
+# rename symbiont fasta
+#mv symABCD.fasta.zip?dl=0 symABCD_transcriptome.fasta.zip
+
+# unzip symbiont fasta
+#unzip symABCD_transcriptome.fasta.zip
+
+# check chromosome names
+#grep ">chr" symABCD.fasta
+
+# A. millepora and symbiont references use the same chromosome names
+# this will cause a sorting issue with samtools later when mapping reads
+# so the header of .sam files will be unsorted instead of sorted
+
+# concatenate A. millepora and symbionts genomes
+#cat Amil.v2.01.fasta symABCD.fasta > amil_symbTrans.fasta
+
+# instead use carly's genome already concatenated with A. millepora and symbionts
+cd /work/06909/cbscott/sym_references/
+cp Amil_symABCD.fasta /work/07368/sbes29/ls6/db
+
+# created separate conda environment for bowtie2
+conda activate seashore
+
+export GENOME_FASTA=$WORK/db/Amil_symABCD.fasta
+
+# index genome for bowtie2 mapper
+echo "bowtie2-build $GENOME_FASTA $GENOME_FASTA" >btb
+ls6_launcher_creator.py -j btb -n btb -l btbl -t 2:00:00 -a IBN21018 -e sbeskid@utexas.edu -w 1
+sbatch btbl
+
+# samtools index - fast, so can run on login node
+idev
+
+# switch back to conda environment with samtools
+conda activate coralz
+
+export GENOME_FASTA=$WORK/db/Amil_symABCD.fasta
+samtools faidx $GENOME_FASTA
+# wait finished
+exit
