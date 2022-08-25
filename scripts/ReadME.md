@@ -14,3 +14,5 @@
 6. [Use DESeq2 to calculate log-fold change from gene count data](https://github.com/SGBes/coral-adaptive-response-to-env-gradients/blob/main/scripts/DESeq2_logFoldChange.R)
 
 7. [Multivariate analysis and plots](https://github.com/SGBes/coral-adaptive-response-to-env-gradients/blob/main/scripts/multivariate_analysis.R)
+
+8. [Include general stress response - Red Module from Dixon et al., 2020 - in gene set overlap analysis for gene expression](https://github.com/SGBes/coral-adaptive-response-to-env-gradients/blob/main/scripts/multivariate_analysis_RedModule.R)
